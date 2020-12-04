@@ -651,32 +651,39 @@ def quantify(isoform_sequences=''):
                 sys.stderr.write('Expected 4 columns in manifest.tsv, got %s. Exiting.\n' % len(cols))
                 return 1
 
-            # sample, group, batch, readFile = cols
+            sample, group, batch, read_file = cols
 
-            read_file_root = tempfile.NamedTemporaryFile().name
-            if args.temp_dir != '':
-                if not os.path.isdir(args.temp_dir):
-                    subprocess.call(['mkdir', args.temp_dir])
-                read_file_root = args.temp_dir + '/' + read_file_root[read_file_root.rfind('/') + 1:]
+            # Only create a new temp file if the reads file is not already aligned:
+            if read_file.endswith(".sam"):
+                sam_data.append(cols + read_file)
+            else:
+                read_file_root = tempfile.NamedTemporaryFile().name
+                if args.temp_dir != '':
+                    if not os.path.isdir(args.temp_dir):
+                        subprocess.call(['mkdir', args.temp_dir])
+                    read_file_root = args.temp_dir + '/' + read_file_root[read_file_root.rfind('/') + 1:]
 
-            sam_data.append(cols + [read_file_root + '.sam'])
+                sam_data.append(cols + [read_file_root + '.sam'])
 
-        for num, sample in enumerate(sam_data, 0):
+    for num, sample in enumerate(sam_data):
             sys.stderr.write(
                 "Step 1/3. Aligning sample %s_%s: %s/%s \r" % (sample[0], sample[2], num + 1, len(sam_data)))
-            mm2_command = [args.m, '-a', '-N', '4', '-t', args.t, args.i, sample[-2]]
-            try:
-                if subprocess.call(mm2_command,
-                                   stdout=open(sample[-1], 'w'),
-                                   stderr=open(sample[-1] + '.mm2_stderr.txt', 'w')):
-                    sys.stderr.write('Check {} file\n'.format(sample[-1] + '.mm2_stderr.txt'))
+
+            # Again, only align the data if we have to:
+            if not sample[-2].endswith(".sam"):
+                mm2_command = [args.m, '-a', '-N', '4', '-t', args.t, args.i, sample[-2]]
+                try:
+                    if subprocess.call(mm2_command,
+                                       stdout=open(sample[-1], 'w'),
+                                       stderr=open(sample[-1] + '.mm2_stderr.txt', 'w')):
+                        sys.stderr.write('Check {} file\n'.format(sample[-1] + '.mm2_stderr.txt'))
+                        return 1
+                except:
+                    sys.stderr.write('''Possible minimap2 error, please check that all file, directory,
+                        and executable paths exist\n''')
                     return 1
-            except:
-                sys.stderr.write('''Possible minimap2 error, please check that all file, directory,
-                    and executable paths exist\n''')
-                return 1
-            subprocess.call(['rm', sample[-1] + '.mm2_stderr.txt'])
-            sys.stderr.flush()
+                subprocess.call(['rm', sample[-1] + '.mm2_stderr.txt'])
+                sys.stderr.flush()
 
             if args.quality != '0' and not args.trust_ends and not args.salmon:
                 if subprocess.call([args.sam, 'view', '-q', args.quality, '-h', '-S', sample[-1]],
@@ -686,25 +693,25 @@ def quantify(isoform_sequences=''):
 
     count_data = dict()
     for num, data in enumerate(sam_data):
-        sample, group, batch, readFile, samOut = data
+        sample, group, batch, read_file, sam_out = data
         sys.stderr.write(
             "Step 2/3. Quantifying isoforms for sample %s_%s: %s/%s \r" % (sample, batch, num + 1, len(sam_data)))
 
         if not args.salmon:
-            count_cmd = [sys.executable, path + 'bin/count_sam_transcripts.py', '-s', samOut,
-                         '-o', samOut + '.counts.txt', '-t', args.t, '--quality', args.quality]
+            count_cmd = [sys.executable, path + 'bin/count_sam_transcripts.py', '-s', sam_out,
+                         '-o', sam_out + '.counts.txt', '-t', args.t, '--quality', args.quality]
             if args.trust_ends:
                 count_cmd += ['--trust_ends']
             subprocess.call(count_cmd)
-            for line in open(samOut + '.counts.txt'):
+            for line in open(sam_out + '.counts.txt'):
                 line = line.rstrip().split('\t')
                 iso, numreads = line[0], line[1]
                 if iso not in count_data: count_data[iso] = np.zeros(len(sam_data))
                 count_data[iso][num] = numreads
         else:
-            subprocess.call([args.salmon, 'quant', '-t', args.i, '-o', samOut[:-4] + '.salmon',
-                             '-p', args.t, '-l', 'U', '-a', samOut], stderr=open('salmon_stderr.txt', 'w'))
-            salmon_out = open(samOut[:-4] + '.salmon/quant.sf')
+            subprocess.call([args.salmon, 'quant', '-t', args.i, '-o', sam_out[:-4] + '.salmon',
+                             '-p', args.t, '-l', 'U', '-a', sam_out], stderr=open('salmon_stderr.txt', 'w'))
+            salmon_out = open(sam_out[:-4] + '.salmon/quant.sf')
             salmon_out.readline()  # header
             for line in salmon_out:
                 line = line.rstrip().split('\t')
@@ -714,9 +721,12 @@ def quantify(isoform_sequences=''):
                     count_data[iso][num] = tpm
                 else:
                     count_data[iso][num] = numreads
-            subprocess.call(['rm', '-r', samOut[:-4] + '.salmon/', 'salmon_stderr.txt'])
+            subprocess.call(['rm', '-r', sam_out[:-4] + '.salmon/', 'salmon_stderr.txt'])
         sys.stderr.flush()
-        subprocess.call(['rm', samOut])
+
+        # Only delete the sam file if it was not the original input file:
+        if not read_file.endswith(".sam"):
+            subprocess.call(['rm', sam_out])
 
     sys.stderr.write("Step 3/3. Writing counts to {} \r".format(args.o))
     count_matrix = open(args.o, 'w')
